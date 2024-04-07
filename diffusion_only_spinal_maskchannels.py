@@ -18,7 +18,7 @@ from ema_pytorch import EMA
 import sys 
 sys.path.append("..") 
 # from model.unet import * #这个很可以
-from model.diffusion_big1126 import *
+from model.diffusion_condition import *
 from model.dataset import *
 from model.loss import *
 
@@ -27,10 +27,24 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import mean_squared_error as mse
 from skimage.metrics import normalized_root_mse as nrmse
 
-spinal_train_dir = "/home/zhangsenpeng/MRI_sequence_synthesis/70MRI_1/train_spinal_MRI_1126"
-spinal_test_dir = "/home/zhangsenpeng/MRI_sequence_synthesis/70MRI_1/test_spinal_MRI_1126"
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True #False # 让速度更快
+def worker_init_fn(worker_id):
+    np.random.seed((worker_id + torch.initial_seed()) % np.iinfo(np.int32).max)
+set_seed()
+
+spinal_train_dir = "./DiffusionSpinalMRISynthesis/Data_MRI/train_spinal_MRI"
+spinal_test_dir = "./DiffusionSpinalMRISynthesis/Data_MRI/test_spinal_MRI"
+
 spinal_train_dataset = MRI_patient_Dataset(dir_path=spinal_train_dir)#spinal_train_dir
 spinal_test_dataset = MRI_patient_Dataset_fortest(dir_path=spinal_test_dir)
+
 
 class Trainer(object):
     def __init__(self, net_G:nn.Module, train_dataloader, test_dataloader, 
@@ -87,17 +101,16 @@ class Trainer(object):
                 with autocast():
                     loss = self.net_G(target_img, input_img) / self.gradient_accumulate_every #模型训练仍用netG的参数，模型保存和推理用指数平滑的参数
                     self.loss_list.append(loss.cpu().detach().numpy())
-                    if idx % self.gradient_accumulate_every==0:
-                        self.scaler.scale(loss).backward()
-                        self.scaler.step(self.optimizer_G)
-                        self.scaler.update()
-                        self.scheduler_G.step(epoch + idx / batch_num)
-                        self.optimizer_G.zero_grad()
-                        self.ema.update()
+                if idx % self.gradient_accumulate_every==0:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer_G)
+                    self.scheduler_G.step(epoch + idx / batch_num)
+                    self.scaler.update()
+                    self.ema.update()
+                    self.optimizer_G.zero_grad()
                     
                 
                 if len(self.loss_list) % 50==0:
-                    self.save(epoch, loss)
                     f.write(f"Epoch: {epoch}, Batch_idx: {idx}, lr: {self.optimizer_G.state_dict()['param_groups'][0]['lr']}, loss: {loss.cpu().item()} \n")
 
                 if len(self.loss_list) % 200 ==0:
@@ -185,7 +198,7 @@ class Trainer(object):
         self.optimizer_G.load_state_dict(checkpoint['optimizer'])
 
 
-device = 'cuda:1'
+device = 'cuda:0'
 config = {
     'image_size':256,
     'in_channels':1+3,
@@ -221,10 +234,10 @@ args_dict = {
     'learning_rate':1e-4, 
     'gradient_accumulate_every':1,
     'device':device, 
-    'logname':"/home/zhangsenpeng/MRI_sequence_synthesis/log/1213_bigunet_only_spinal_diffusion_1000patients_mask_channels.txt", 
-    'savename_G': "/home/zhangsenpeng/MRI_sequence_synthesis/model/model_save/1213_diffusion_model_opt_1000_mask_channels.pth",
-    'remark': "1000 patients only spinal diffusion",
-    'picture_save': "/home/zhangsenpeng/MRI_sequence_synthesis/pictures/1213_bigunet_only_spinal_diffusion_1000mask_channels/"
+    'logname':"./DiffusionSpinalMRISynthesis/log/your_log_path.txt", 
+    'savename_G': "./DiffusionSpinalMRISynthesis/model_save/diffusion_model_mask_channels_500epoch.pth",
+    'remark': "1000 patients only spinal diffusion mask_channels",
+    'picture_save': "./DiffusionSpinalMRISynthesis/pictures_forshow/diffusion_model_mask_channels_500epoch/"
 }
 
 diffusion_trianer = Trainer(**args_dict)

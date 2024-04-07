@@ -1,0 +1,1 @@
+This section is only intended to show the format of the MRI data that we have processed and is intended for academic use only, as privacy does not allow the full data set to be disclosed.

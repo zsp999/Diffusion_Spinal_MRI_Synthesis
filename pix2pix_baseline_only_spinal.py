@@ -17,7 +17,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 import sys 
 sys.path.append("..") 
-from model.unet_attention_False import UNetModel, SimpleDiscriminator
+from model.unet_pix2pix import UNetModel, SimpleDiscriminator
 from model.dataset import *
 from model.loss import *
 from model.loss import torch_ssim
@@ -27,10 +27,25 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import mean_squared_error as mse
 from skimage.metrics import normalized_root_mse as nrmse
 
-spinal_train_dir = "/home/zhangsenpeng/MRI_sequence_synthesis/70MRI_1/train_spinal_MRI_1126"
-spinal_test_dir = "/home/zhangsenpeng/MRI_sequence_synthesis/70MRI_1/test_spinal_MRI_1126"
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True #False # 让速度更快
+def worker_init_fn(worker_id):
+    np.random.seed((worker_id + torch.initial_seed()) % np.iinfo(np.int32).max)
+set_seed()
+
+
+spinal_train_dir = "./DiffusionSpinalMRISynthesis/Data_MRI/train_spinal_MRI"
+spinal_test_dir = "./DiffusionSpinalMRISynthesis/Data_MRI/test_spinal_MRI"
+
 spinal_train_dataset = MRI_patient_Dataset(dir_path=spinal_train_dir)#spinal_train_dir
 spinal_test_dataset = MRI_patient_Dataset_fortest(dir_path=spinal_test_dir)
+
 
 class Trainer(object):
     def __init__(self, net_G:nn.Module, net_D:nn.Module, train_dataloader, test_dataloader, 
@@ -58,7 +73,8 @@ class Trainer(object):
         # 损失函数先L1再L2试试，先L2不太好 L2损失效果不好
         self.rec_loss = nn.L1Loss() #用L1损失
         self.G_rec_loss_list = []
-        self.scaler = GradScaler()#混合精度浮点运算
+        self.scaler_D = GradScaler()#混合精度浮点运算
+        self.scaler_G = GradScaler()
 
     def get_data_from_batch(self, batch_data:torch.Tensor):
         return (batch_data[:,:3,:,:].to(self.device), batch_data[:,3:,:,:].to(self.device))
@@ -80,7 +96,6 @@ class Trainer(object):
                     fake_img = self.net_G(input_img)
                     
                     #先更新D
-                    self.optimizer_D.zero_grad()
                     predlabel_fake = self.net_D(fake_img.detach(), input_img)
                     predlabel_real = self.net_D(target_img, input_img)
                     realpatch_label, fakepatch_label = torch.ones_like(predlabel_fake, dtype=torch.float32, device=self.device), \
@@ -89,13 +104,7 @@ class Trainer(object):
                         self.gan_patchloss(predlabel_real, realpatch_label)
                     D_loss = D_loss_fake + D_loss_real
 
-                    self.scaler.scale(D_loss).backward()
-                    self.scaler.step(self.optimizer_D)
-                    self.scaler.update()
-                    self.scheduler_D.step(epoch + idx / batch_num)
-
                     #再更新G
-                    self.optimizer_G.zero_grad()
                     predlabel_fake = self.net_D(fake_img, input_img)
                     G_loss_fake = self.gan_patchloss(predlabel_fake, realpatch_label)
                     G_loss_L1 = self.rec_loss(fake_img, target_img)
@@ -110,12 +119,20 @@ class Trainer(object):
                         G_loss += 1 - SSIM_torch
                     else:
                         SSIM_torch = torch.tensor(0)
+            
+                self.scaler_D.scale(D_loss).backward()
+                self.scaler_D.step(self.optimizer_D)
+                self.scheduler_D.step(epoch + idx / batch_num)
+                self.scaler_D.update()
+                self.optimizer_D.zero_grad()
 
-                    self.scaler.scale(G_loss).backward()
-                    self.scaler.step(self.optimizer_G)
-                    self.scaler.update()
-                    self.scheduler_G.step(epoch + idx / batch_num)
-                    self.G_rec_loss_list.append(G_loss_L1.cpu().detach().numpy())
+                self.scaler_G.scale(G_loss).backward()
+                self.scaler_G.step(self.optimizer_G)
+                self.scheduler_G.step(epoch + idx / batch_num)
+                self.scaler_G.update()
+                self.optimizer_G.zero_grad()
+                
+                self.G_rec_loss_list.append(G_loss_L1.cpu().detach().numpy())
                 
                 if len(self.G_rec_loss_list) % 50==0:
                     f.write(f"Epoch: {epoch}, Batch_idx: {idx}, lr: {self.optimizer_D.state_dict()['param_groups'][0]['lr']}, G_loss: {G_loss.cpu().item()}, D_loss: {D_loss.cpu().item()}, G_loss_L1: {G_loss_L1.cpu().item()} \n")
@@ -188,7 +205,6 @@ class Trainer(object):
             'net_D': self.net_D,
             'optimizer_G': self.optimizer_G.state_dict(),
             'optimizer_D': self.optimizer_D.state_dict(),
-            'scaler': self.scaler.state_dict()
         }
 
         torch.save(checkpoint, self.savename_GD)
@@ -230,10 +246,10 @@ args_dict = {
     'use_SSIM_Loss':True,
 
     'device':device, 
-    'logname':"/home/zhangsenpeng/MRI_sequence_synthesis/log/1227_bigunet_pix2pix_only_spinal_baseline.txt", 
-    'savename_GD':"/home/zhangsenpeng/MRI_sequence_synthesis/model/model_save/1227_bigunet_spinal_only_pix2pix_baseline_500epoch.pth", 
+    'logname':"./DiffusionSpinalMRISynthesis/log/your_log_path.txt", 
+    'savename_GD':"./DiffusionSpinalMRISynthesis/model_save/pix2pix_baseline_spinal_500epoch.pth", 
     'remark': "noCloss hasSSIMloss only spinal 500epoch MAEloss NoATTN!!!!",
-    'picture_save': "/home/zhangsenpeng/MRI_sequence_synthesis/pictures/1227_bigunet_pix2pix_only_spinal_baseline/"
+    'picture_save': "./DiffusionSpinalMRISynthesis/pictures_forshow/pix2pix_baseline_spinal_500epoch/"
 }
 # 不太好
 pix2pix_trianer = Trainer(**args_dict)
